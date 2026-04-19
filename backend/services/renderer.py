@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Sequence
 
+from services.face_layout import ClipLayout, Segment
 from services.whisper import WordTimestamp
 
 
@@ -74,6 +75,7 @@ class RenderRequest:
     hook_text: str
     words: Sequence[WordTimestamp]
     ass_path: Path
+    layout: ClipLayout | None = None
 
 
 def ensure_ffmpeg() -> None:
@@ -298,6 +300,136 @@ def _escape_for_ffmpeg_filter(path: Path) -> str:
     return text
 
 
+def _panel_crop_box(
+    sh: int,
+    x_start: int,
+    x_end: int,
+    face_x: int,
+    face_y: int,
+    panel_w: int,
+    panel_h: int,
+) -> tuple[int, int, int, int]:
+    """Compute (crop_w, crop_h, crop_x, crop_y) for one stacked panel.
+
+    The crop is bounded to the horizontal slice [x_start, x_end] of the source
+    (so the *other* speaker can never leak in), shaped to the panel's aspect
+    ratio, and centered on the detected face position.
+    """
+    avail_w = max(1, x_end - x_start)
+    avail_h = sh
+    panel_aspect = panel_w / panel_h
+    avail_aspect = avail_w / avail_h
+
+    if avail_aspect >= panel_aspect:
+        crop_h = avail_h
+        crop_w = max(1, int(round(crop_h * panel_aspect)))
+    else:
+        crop_w = avail_w
+        crop_h = max(1, int(round(crop_w / panel_aspect)))
+
+    cx_min = x_start + crop_w // 2
+    cx_max = x_end - crop_w // 2
+    if cx_min > cx_max:
+        cx_min = cx_max = (x_start + x_end) // 2
+    cx = max(cx_min, min(face_x, cx_max))
+    crop_x = cx - crop_w // 2
+
+    cy_min = crop_h // 2
+    cy_max = sh - crop_h // 2
+    if cy_min > cy_max:
+        cy_min = cy_max = sh // 2
+    cy = max(cy_min, min(face_y, cy_max))
+    crop_y = cy - crop_h // 2
+
+    return crop_w, crop_h, crop_x, crop_y
+
+
+def _segment_crop_chain(seg: Segment, sw: int, sh: int, idx: int) -> str:
+    """Filter chain that turns a trimmed source clip into a 1080x1920 frame.
+
+    Returned string is everything *after* the trim+setpts of one segment and
+    ends with a single output pixel stream sized exactly VIDEO_WIDTH x VIDEO_HEIGHT.
+    Internal labels are suffixed with ``idx`` so multiple segments don't collide.
+    """
+    if seg.kind == "stacked" and sw > 0 and sh > 0:
+        panel_w = VIDEO_WIDTH
+        panel_h = VIDEO_HEIGHT // 2  # 960
+        split_x = (seg.top_center_x + seg.bottom_center_x) // 2
+        split_x = max(1, min(sw - 1, split_x))
+
+        w1, h1, x1, y1 = _panel_crop_box(
+            sh, 0, split_x, seg.top_center_x, seg.top_center_y, panel_w, panel_h
+        )
+        w2, h2, x2, y2 = _panel_crop_box(
+            sh, split_x, sw, seg.bottom_center_x, seg.bottom_center_y, panel_w, panel_h
+        )
+        return (
+            f"split=2[a{idx}][b{idx}];"
+            f"[a{idx}]crop={w1}:{h1}:{x1}:{y1},scale={panel_w}:{panel_h}[top{idx}];"
+            f"[b{idx}]crop={w2}:{h2}:{x2}:{y2},scale={panel_w}:{panel_h}[bot{idx}];"
+            f"[top{idx}][bot{idx}]vstack=inputs=2"
+        )
+
+    # single — face-aware crop if we know where the speaker is
+    if seg.single_center_x >= 0 and sw > 0 and sh > 0:
+        crop_w = int(round(sh * VIDEO_WIDTH / VIDEO_HEIGHT))
+        crop_w = min(crop_w, sw)
+        cx_min = crop_w // 2
+        cx_max = sw - crop_w // 2
+        if cx_min > cx_max:
+            cx = sw // 2
+        else:
+            cx = max(cx_min, min(seg.single_center_x, cx_max))
+        crop_x = cx - crop_w // 2
+        return f"crop={crop_w}:{sh}:{crop_x}:0,scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}"
+
+    # No face info → fall back to the original geometric center crop.
+    return f"crop=ih*9/16:ih,scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}"
+
+
+def _build_filter_complex(
+    layout: ClipLayout | None, duration: float, ass_arg: str
+) -> str:
+    """Compose a -filter_complex graph that switches layout per segment.
+
+    The graph trims each segment from the source, applies the segment's crop
+    chain, concatenates the segments in order, then burns subtitles on the
+    full timeline (subtitle timestamps are clip-relative, which matches the
+    concatenated output's PTS).
+    """
+    if layout is None or not layout.segments:
+        return (
+            f"[0:v]crop=ih*9/16:ih,scale={VIDEO_WIDTH}:{VIDEO_HEIGHT},"
+            f"subtitles={ass_arg}[vout]"
+        )
+
+    sw, sh = layout.source_width, layout.source_height
+    parts: List[str] = []
+    seg_labels: List[str] = []
+
+    for i, seg in enumerate(layout.segments):
+        s = max(0.0, seg.start_offset)
+        e = min(duration, max(s + 0.001, seg.end_offset))
+        chain = _segment_crop_chain(seg, sw, sh, i)
+        # Normalise pixel format AND aspect ratio across segments — concat
+        # refuses inputs whose SAR or pix_fmt don't match, and the stacked vs
+        # single chains naturally end up with slightly different SARs.
+        parts.append(
+            f"[0:v]trim={s:.3f}:{e:.3f},setpts=PTS-STARTPTS,{chain},"
+            f"setsar=1,format=yuv420p[v{i}]"
+        )
+        seg_labels.append(f"[v{i}]")
+
+    if len(seg_labels) == 1:
+        parts.append(f"{seg_labels[0]}null[vcat]")
+    else:
+        parts.append(
+            f"{''.join(seg_labels)}concat=n={len(seg_labels)}:v=1:a=0[vcat]"
+        )
+    parts.append(f"[vcat]subtitles={ass_arg}[vout]")
+    return ";".join(parts)
+
+
 def render_clip(req: RenderRequest) -> Path:
     """Render a single 9:16 clip with burned-in subtitles."""
     bin_path = ffmpeg_bin()
@@ -312,10 +444,7 @@ def render_clip(req: RenderRequest) -> Path:
 
     duration = max(0.5, req.end_sec - req.start_sec)
     ass_arg = _escape_for_ffmpeg_filter(req.ass_path)
-    vf = (
-        f"crop=ih*9/16:ih,scale={VIDEO_WIDTH}:{VIDEO_HEIGHT},"
-        f"subtitles={ass_arg}"
-    )
+    filter_complex = _build_filter_complex(req.layout, duration, ass_arg)
 
     req.output_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -324,7 +453,9 @@ def render_clip(req: RenderRequest) -> Path:
         "-ss", f"{req.start_sec:.3f}",
         "-i", str(req.source_path),
         "-t", f"{duration:.3f}",
-        "-vf", vf,
+        "-filter_complex", filter_complex,
+        "-map", "[vout]",
+        "-map", "0:a?",
         "-c:v", "libx264",
         "-preset", "fast",
         "-crf", "23",
@@ -334,9 +465,15 @@ def render_clip(req: RenderRequest) -> Path:
         "-movflags", "+faststart",
         str(req.output_path),
     ]
-    logger.info("Rendering clip -> %s", req.output_path.name)
+    logger.info(
+        "Rendering clip -> %s (%d segment(s))",
+        req.output_path.name,
+        len(req.layout.segments) if req.layout else 0,
+    )
     completed = subprocess.run(cmd, capture_output=True, text=True)
     if completed.returncode != 0:
-        raise RuntimeError(f"ffmpeg render failed: {completed.stderr[-800:]}")
+        logger.error("ffmpeg cmd: %s", " ".join(cmd))
+        logger.error("ffmpeg stderr (full): %s", completed.stderr)
+        raise RuntimeError(f"ffmpeg render failed: {completed.stderr[-1500:]}")
 
     return req.output_path

@@ -12,7 +12,7 @@ from sqlmodel import select
 
 from config import CLIPS_DIR, TEMP_DIR, UPLOADS_DIR
 from db import Clip, Video, session_scope
-from services import claude_analyze, renderer, whisper
+from services import claude_analyze, face_layout, renderer, whisper
 
 
 logger = logging.getLogger(__name__)
@@ -137,6 +137,22 @@ def process_video(video_id: str) -> None:
             output_path = CLIPS_DIR / output_filename
             ass_path = TEMP_DIR / f"{video_id}_clip_{index}.ass"
 
+            layout = face_layout.detect_layout(
+                source_path, pick.start_sec, pick.end_sec
+            )
+            seg_summary = ", ".join(
+                f"{seg.kind}({seg.start_offset:.1f}-{seg.end_offset:.1f}s)"
+                for seg in layout.segments
+            )
+            logger.info(
+                "Clip %d layout segments [src=%dx%d, dur=%.1fs]: %s",
+                index,
+                layout.source_width,
+                layout.source_height,
+                layout.duration,
+                seg_summary or "<none>",
+            )
+
             req = renderer.RenderRequest(
                 source_path=source_path,
                 output_path=output_path,
@@ -145,6 +161,7 @@ def process_video(video_id: str) -> None:
                 hook_text=pick.hook,
                 words=transcript.words,
                 ass_path=ass_path,
+                layout=layout,
             )
             renderer.render_clip(req)
             _save_clip_row(video_id, index, pick, output_filename)
