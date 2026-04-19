@@ -1,0 +1,32 @@
+# --- Backend ---
+backend/.env
+backend/.venv/
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/storage/uploads/*
+backend/storage/clips/*
+backend/storage/temp/*
+backend/storage/clipkar.db
+backend/storage/clipkar.db-journal
+backend/bin/ffmpeg
+backend/bin/ffprobe
+!backend/storage/uploads/.gitkeep
+!backend/storage/clips/.gitkeep
+!backend/storage/temp/.gitkeep
+
+# --- Frontend ---
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+frontend/.env*.local
+frontend/next-env.d.ts
+frontend/.eslintcache
+
+# --- Editor / OS ---
+.DS_Store
+.vscode/
+.idea/
+*.log
