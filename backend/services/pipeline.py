@@ -106,10 +106,15 @@ def process_video(video_id: str) -> None:
             _set_status(video_id, "processing", duration=duration)
 
         audio_path = TEMP_DIR / f"{video_id}.mp3"
-        renderer.extract_audio(source_path, audio_path)
 
         _set_progress(video_id, "Transcribing with Whisper...")
-        transcript = whisper.transcribe(audio_path)
+        # Cached on the source video's SHA-256: re-uploads of the same
+        # file skip both audio extraction and the OpenAI call.
+        transcript = whisper.transcribe_video(
+            source_path,
+            audio_path,
+            extract_audio_fn=renderer.extract_audio,
+        )
         if transcript.language:
             _set_status(video_id, "processing", language=transcript.language)
 

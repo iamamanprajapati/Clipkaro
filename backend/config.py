@@ -12,6 +12,8 @@ STORAGE_DIR: Path = BASE_DIR / "storage"
 UPLOADS_DIR: Path = STORAGE_DIR / "uploads"
 CLIPS_DIR: Path = STORAGE_DIR / "clips"
 TEMP_DIR: Path = STORAGE_DIR / "temp"
+CACHE_DIR: Path = STORAGE_DIR / "cache"
+WHISPER_CACHE_DIR: Path = CACHE_DIR / "whisper"
 DB_PATH: Path = STORAGE_DIR / "clipkar.db"
 
 
@@ -33,6 +35,11 @@ class Settings(BaseSettings):
     WHISPER_MODEL: str = "whisper-1"
     CLAUDE_MODEL: str = "claude-haiku-4-5-20251001"
 
+    # When true, transcripts and clip-pick responses are cached on disk and
+    # re-used on subsequent runs of the same audio/transcript. This avoids
+    # paying for OpenAI / Anthropic calls when re-testing the same video.
+    ENABLE_API_CACHE: bool = True
+
     FRONTEND_ORIGIN: str = "http://localhost:3000"
 
     @property
@@ -45,5 +52,12 @@ settings = Settings()
 
 def ensure_directories() -> None:
     """Create storage directories if they do not exist."""
-    for directory in (STORAGE_DIR, UPLOADS_DIR, CLIPS_DIR, TEMP_DIR):
+    for directory in (
+        STORAGE_DIR,
+        UPLOADS_DIR,
+        CLIPS_DIR,
+        TEMP_DIR,
+        CACHE_DIR,
+        WHISPER_CACHE_DIR,
+    ):
         directory.mkdir(parents=True, exist_ok=True)

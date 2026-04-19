@@ -8,6 +8,7 @@ backend/*.pyc
 backend/storage/uploads/*
 backend/storage/clips/*
 backend/storage/temp/*
+backend/storage/cache/*
 backend/storage/clipkar.db
 backend/storage/clipkar.db-journal
 backend/bin/ffmpeg
