@@ -16,6 +16,7 @@ export default function HomePage() {
 
   useEffect(() => {
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
     async function load() {
       try {
@@ -23,6 +24,13 @@ export default function HomePage() {
         if (cancelled) return;
         setVideos(data);
         setError(null);
+
+        const hasActive = data.some(
+          (v) => v.status === "processing" || v.status === "uploaded",
+        );
+        if (hasActive) {
+          timer = setTimeout(load, 5000);
+        }
       } catch (err) {
         if (cancelled) return;
         const message = err instanceof Error ? err.message : "Failed to load videos";
@@ -31,26 +39,17 @@ export default function HomePage() {
           toast.error(message);
           errorShown.current = true;
         }
+        timer = setTimeout(load, 5000);
       }
     }
 
     load();
-    const interval = setInterval(() => {
-      if (!videos) {
-        load();
-        return;
-      }
-      const hasActive = videos.some(
-        (v) => v.status === "processing" || v.status === "uploaded",
-      );
-      if (hasActive) load();
-    }, 5000);
 
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      if (timer) clearTimeout(timer);
     };
-  }, [videos]);
+  }, []);
 
   return (
     <div className="space-y-8">
